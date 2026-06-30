@@ -1,0 +1,140 @@
+name: 生成角色语音并发布（带量化与进度提示）
+
+on:
+  workflow_dispatch:  # 手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      # ---------- 1. 系统信息与依赖 ----------
+      - name: 打印系统信息
+        run: |
+          echo "=== 系统信息 ==="
+          uname -a
+          lscpu | grep -E "Model name|Socket|Core|Thread"
+          free -h
+          df -h .
+
+      - name: 安装 ffmpeg 等
+        run: sudo apt update && sudo apt install ffmpeg -y
+
+      # ---------- 2. Python 环境 ----------
+      - name: 设置 Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: 安装 Python 依赖（含量化支持）
+        run: |
+          echo "开始安装 PyTorch (CPU)..."
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+          echo "安装 RVC CLI 和 ONNX Runtime..."
+          pip install edge-tts rvc-cli onnxruntime
+          echo "依赖安装完成。"
+
+      # ---------- 3. 下载音高提取模型（ONNX） ----------
+      - name: 下载 RMVPE ONNX 模型
+        run: |
+          mkdir -p assets
+          echo "下载音高提取模型 rmvpe.onnx ..."
+          wget -q --show-progress -P ./assets https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.onnx
+          ls -lh ./assets/rmvpe.onnx
+
+      # ---------- 4. 缓存角色模型（.pth） ----------
+      - name: 缓存角色模型
+        id: cache-pth
+        uses: actions/cache@v4
+        with:
+          path: ./weights
+          key: cerydra-pth-v1
+
+      - name: 下载角色模型（若缓存未命中）
+        if: steps.cache-pth.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p weights
+          echo "开始下载刻律德菈模型 (164MB)..."
+          wget -q --show-progress -O ./weights/Cerydra_e20_s2400.pth \
+            https://github.com/yingo-server/TextToSpeak/releases/download/cerydra/Cerydra_e20_s2400.pth
+          ls -lh ./weights/Cerydra_e20_s2400.pth
+
+      # ---------- 5. 缓存 ONNX 转换后的模型（量化加速） ----------
+      - name: 缓存 ONNX 量化模型
+        uses: actions/cache@v4
+        id: cache-onnx
+        with:
+          path: ./onnx_cache
+          key: cerydra-onnx-v1  # 若 .pth 变化，需改此 key
+
+      # ---------- 6. 生成 TTS 干声 ----------
+      - name: 用 Edge TTS 生成干声
+        run: |
+          echo "开始生成 TTS 干声（文字：败者成灰，胜者为王）..."
+          edge-tts --text "败者成灰，胜者为王" --write-media ./input.wav
+          echo "干声生成完成，文件信息："
+          ls -lh ./input.wav
+          ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "音频时长：{} 秒"
+
+      # ---------- 7. RVC 推理（使用 ONNX 量化） ----------
+      - name: 运行 RVC 转换（ONNX量化加速）
+        run: |
+          echo "=== 开始 RVC 转换 ==="
+          START_TIME=$(date +%s)
+          echo "使用模型：./weights/Cerydra_e20_s2400.pth"
+          echo "输入音频：./input.wav"
+          echo "量化缓存目录：./onnx_cache"
+          echo "音高提取方法：rmvpe (ONNX)"
+          echo "开始推理，请稍候（纯CPU，约5-10分钟）..."
+
+          # 使用 --use_onnx True 启用量化，--onnx_dir 指定缓存目录
+          rvc-cli --model ./weights/Cerydra_e20_s2400.pth \
+                  --input ./input.wav \
+                  --output ./output.mp3 \
+                  --f0_method rmvpe \
+                  --use_onnx True \
+                  --onnx_dir ./onnx_cache
+
+          END_TIME=$(date +%s)
+          DURATION=$((END_TIME - START_TIME))
+          echo "转换完成，总耗时：${DURATION} 秒 ($((DURATION/60)) 分 $((DURATION%60)) 秒)"
+          echo "输出文件信息："
+          ls -lh ./output.mp3
+
+      # ---------- 8. 准备 Release 信息 ----------
+      - name: 生成版本号
+        id: version
+        run: |
+          TIMESTAMP=$(date +"%Y%m%d%H%M%S")
+          VERSION="[BOT][$TIMESTAMP][败者成灰，胜者为王]"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
+          echo "生成的 Release 标题：$VERSION"
+
+      # ---------- 9. 删除旧 Release（tag=output） ----------
+      - name: 删除旧的 Release 和 Tag
+        continue-on-error: true
+        run: |
+          echo "清理旧的 output Release 和 Tag..."
+          gh release delete output --yes || true
+          git push origin :refs/tags/output || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------- 10. 创建新 Release ----------
+      - name: 创建 Release
+        run: |
+          echo "创建新 Release..."
+          gh release create output \
+            ./output.mp3 \
+            --title "${{ env.VERSION }}" \
+            --notes "自动生成于 $(date '+%Y-%m-%d %H:%M:%S')\n文字：败者成灰，胜者为王\n模型：刻律德菈 (无.index)\n量化：ONNX 加速已启用" \
+            --target ${{ github.sha }}
+          echo "Release 创建成功！"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
