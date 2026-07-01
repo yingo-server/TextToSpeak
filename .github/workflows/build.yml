@@ -54,19 +54,24 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-cache-${{ runner.os }}-v3
+          key: pip-cache-${{ runner.os }}-v4
 
-      - name: 安装官方 RVC CLI（CPU 版）及 Edge TTS
+      # ---------- 安装 PyTorch 2.5.1 及 RVC CLI ----------
+      - name: 安装 PyTorch 2.5.1 + RVC CLI + 依赖
         run: |
-          echo "安装 CPU 版 PyTorch..."
-          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-          echo "安装官方 RVC CLI（固定 commit，避免上游变更）..."
+          echo "安装 PyTorch 2.5.1 CPU 版（兼容 RVC 模型加载）..."
+          pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+          echo "安装官方 RVC CLI（固定 commit）..."
           RVC_COMMIT="7b284a634667c34103eaaeed972b48ccdb4b893e"
           pip install git+https://github.com/RVC-Project/Retrieval-based-Voice-Conversion.git@${RVC_COMMIT}
+          echo "显式安装 fairseq（确保版本一致）..."
+          pip install fairseq
           echo "安装 Edge TTS..."
           pip install edge-tts
-          # 额外安装 fairseq 以便处理 Dictionary
-          pip install fairseq
+          # 打印关键包版本，便于调试
+          python -c "import torch; print(f'PyTorch: {torch.__version__}')"
+          python -c "import fairseq; print(f'fairseq: {fairseq.__version__}')"
+          rvc --version || true
 
       # ---------- RVC 初始化 ----------
       - name: 初始化 RVC 环境
@@ -74,7 +79,7 @@ jobs:
           rvc init || echo "rvc init 跳过"
           mkdir -p assets/weights assets/hubert
 
-      # ---------- 缓存 RVC 内部缓存（含 Hubert、ONNX 等）提前恢复 ----------
+      # ---------- 缓存 RVC 内部缓存 ----------
       - name: 缓存 RVC 内部缓存
         id: rvc-cache
         uses: actions/cache@v4
@@ -82,7 +87,7 @@ jobs:
           path: ~/.cache/rvc
           key: rvc-cache-v2
 
-      # ---------- 仅当缓存未命中时下载 Hubert 模型 ----------
+      # ---------- 下载 Hubert 模型 ----------
       - name: 下载 Hubert 模型（仅在缓存未命中时）
         if: steps.rvc-cache.outputs.cache-hit != 'true'
         run: |
@@ -92,7 +97,6 @@ jobs:
             https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base.pt
           echo "Hubert 模型下载完成"
 
-      # ---------- 将 Hubert 模型复制到 assets/hubert/ ----------
       - name: 准备 Hubert 模型到 assets
         run: |
           if [ -f ~/.cache/rvc/hubert/hubert_base.pt ]; then
@@ -103,12 +107,11 @@ jobs:
           fi
           ls -lh assets/hubert/hubert_base.pt
 
-      # ---------- 设置 index_root 和 hubert_path 到 .env ----------
+      # ---------- 设置环境变量 ----------
       - name: 配置环境变量
         run: |
           echo "index_root=$PWD/assets/weights" >> .env
           echo "hubert_path=$PWD/assets/hubert/hubert_base.pt" >> .env
-          echo "已写入 .env："
           cat .env
 
       # ---------- 缓存角色模型 ----------
@@ -158,7 +161,7 @@ jobs:
           cp ./weights/huangquan.pth assets/weights/
           cp ./weights/huangquan.index assets/weights/
 
-      # ---------- 生成 TTS 干声并标准化为 48k 单声道 ----------
+      # ---------- 生成 TTS 干声 ----------
       - name: 用 Edge TTS 生成干声
         env:
           TEXT: ${{ inputs.text }}
@@ -171,8 +174,8 @@ jobs:
           ls -lh ./input.wav
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "时长：{} 秒"
 
-      # ---------- 自定义 Python 推理脚本（绕过 CLI，直接解决 weights_only） ----------
-      - name: 运行 RVC 转换（Python 脚本）
+      # ---------- RVC 推理（PyTorch 2.5.1 自动兼容） ----------
+      - name: 运行 RVC 转换
         run: |
           echo "=== 开始 RVC 转换 ==="
           START_TIME=$(date +%s)
@@ -180,66 +183,18 @@ jobs:
           export index_root=$PWD/assets/weights
           export hubert_path=$PWD/assets/hubert/hubert_base.pt
 
-          python << 'EOF'
-          import os
-          import sys
-          import torch
-          import fairseq.data.dictionary
-          # ===== 关键修复：添加 safe global =====
-          torch.serialization.add_safe_globals([fairseq.data.dictionary.Dictionary])
-
-          # 设置路径
-          sys.path.append(os.getcwd())
-          from configs.config import Config
-          from rvc.modules.vc.modules import VC
-          import soundfile as sf
-          import numpy as np
-
-          model_path = "assets/weights/huangquan.pth"
-          input_wav = "input.wav"
-          output_wav = "output.wav"
-          index_path = "assets/weights/huangquan.index"
-          f0_method = "rmvpe"
-          protect = 0.33
-          f0_up_key = 0
-
-          # 加载配置
-          config = Config()
-          config.weight_root = "assets/weights"
-          config.index_root = "assets/weights"
-          config.hubert_path = os.environ.get("hubert_path", "assets/hubert/hubert_base.pt")
-          config.device = "cpu"
-          config.is_half = False
-
-          vc = VC(config)
-          # 加载模型
-          vc.get_vc(model_path)
-          # 加载索引（如果存在）
-          if os.path.exists(index_path):
-              vc.get_index(index_path)
-              print(f"已加载索引: {index_path}")
-          else:
-              print("警告：未找到索引文件，将不使用索引")
-
-          # 推理
-          sid = 0
-          tgt_sr, audio_opt, times, _ = vc.vc_inference(
-              sid,
-              input_wav,
-              f0_up_key,
-              f0_method,
-              index_path,
-              protect
-          )
-          # 保存音频
-          sf.write(output_wav, audio_opt, tgt_sr)
-          print(f"推理完成，输出: {output_wav}")
-          EOF
+          rvc infer -m assets/weights/huangquan.pth \
+                    -i ./input.wav \
+                    -o ./output.wav \
+                    -if assets/weights/huangquan.index \
+                    -fm rmvpe \
+                    -p 0.33 \
+                    -fu 0
 
           END_TIME=$(date +%s)
           echo "推理完成，耗时：$((END_TIME - START_TIME)) 秒"
 
-      # ---------- 检查输出并转码为 MP3 ----------
+      # ---------- 检查输出并转码 ----------
       - name: 转码为 MP3
         run: |
           if [ ! -f ./output.wav ] || [ ! -s ./output.wav ]; then
@@ -249,7 +204,7 @@ jobs:
           ffmpeg -i ./output.wav -codec:a libmp3lame -q:a 2 ./output.mp3 -y
           ls -lh ./output.mp3
 
-      # ---------- 生成版本号（Tag 安全字符过滤） ----------
+      # ---------- 版本号与发布 ----------
       - name: 生成版本号
         env:
           TEXT: ${{ inputs.text }}
@@ -260,7 +215,6 @@ jobs:
           echo "VERSION=[BOT][$TIMESTAMP][$TEXT]" >> $GITHUB_ENV
           echo "TAG=output-$TIMESTAMP-$TEXT_SUFFIX" >> $GITHUB_ENV
 
-      # ---------- 发布 Release（使用 notes 文件避免字符转义） ----------
       - name: 创建 Release
         env:
           TAG: ${{ env.TAG }}
@@ -273,7 +227,7 @@ jobs:
           文字：$TEXT
           模型：黄泉 (48k, 含 .index)
           引擎：官方 RVC CLI (CPU)
-          加速：自动 ONNX
+          PyTorch: 2.5.1 (兼容版)
           EOF
           envsubst < notes.txt > notes_expanded.txt
           gh release create "$TAG" \
