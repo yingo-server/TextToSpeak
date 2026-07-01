@@ -1,4 +1,4 @@
-name: 生成角色语音并发布（自定义推理脚本）
+name: 生成角色语音并发布（自定义推理脚本 v2）
 
 on:
   workflow_dispatch:
@@ -48,7 +48,7 @@ jobs:
           echo "安装 CPU 版 PyTorch..."
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           echo "安装 ONNX Runtime、Edge TTS 和 torchcrepe..."
-          pip install edge-tts onnxruntime torchcrepe
+          pip install edge-tts onnxruntime torchcrepe librosa soundfile
 
       - name: 克隆 RVC-WebUI 仓库
         run: |
@@ -61,17 +61,12 @@ jobs:
       - name: 安装 RVC 依赖（解决 omegaconf 冲突）
         run: |
           cd rvc-webui
-          # 降级 pip 以兼容旧版 omegaconf 元数据
           pip install pip==23.3.1
-          # 移除 torch 和 torchvision 行（已安装 CPU 版）
           sed -i '/^torch/d' requirements.txt
           sed -i '/^torchvision/d' requirements.txt
-          # 移除 onnxruntime-gpu（改用 CPU 版）
           sed -i '/^onnxruntime-gpu/d' requirements.txt
-          # 安装依赖
           pip install -r requirements.txt
-          # 额外安装可能缺失的 torchcrepe（虽然上面已安装，但以防万一）
-          pip install torchcrepe
+          pip install torchcrepe  # 确保安装
 
       - name: 下载 RMVPE ONNX 模型
         run: |
@@ -110,10 +105,9 @@ jobs:
           import os
           sys.path.append(os.path.dirname(os.path.abspath(__file__)))
           from infer.modules.vc.modules import VC
-          from infer.lib.audio import load_audio, save_audio
-          import torch
-          import numpy as np
           import soundfile as sf
+          import librosa
+          import numpy as np
 
           def main():
               model_path = sys.argv[1]
@@ -123,18 +117,23 @@ jobs:
               use_onnx = sys.argv[5].lower() == "true" if len(sys.argv) > 5 else False
               onnx_dir = sys.argv[6] if len(sys.argv) > 6 else None
 
-              # 初始化 VC 模块
-              vc = VC()
-              # 加载模型（会自动转换 ONNX 如果启用）
-              vc.load_model(model_path, onnx=use_onnx, onnx_dir=onnx_dir)
               # 读取音频
               audio, sr = sf.read(input_path)
               if sr != 40000:
-                  # 重采样到 40k
-                  import librosa
                   audio = librosa.resample(audio, orig_sr=sr, target_sr=40000)
-              # 处理
-              converted = vc.process(audio, f0_method=f0_method)
+
+              # 初始化 VC
+              vc = VC()
+              # 加载模型
+              vc.load_model(model_path, onnx=use_onnx, onnx_dir=onnx_dir)
+              # 尝试调用 process 方法
+              try:
+                  converted = vc.process(audio, f0_method=f0_method, f0_up_key=0)
+              except AttributeError:
+                  try:
+                      converted = vc.vc_transform(audio, f0_method=f0_method, f0_up_key=0)
+                  except AttributeError:
+                      converted = vc.process_audio(audio, f0_method=f0_method, f0_up_key=0)
               # 保存
               sf.write(output_path, converted, 40000)
               print(f"转换完成，输出：{output_path}")
