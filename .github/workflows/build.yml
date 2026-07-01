@@ -70,9 +70,6 @@ jobs:
           sed -i '/^onnxruntime-gpu/d' requirements.txt
           # 安装依赖
           pip install -r requirements.txt
-          # 显式安装 fairseq（确保安装，若已包含则跳过）
-          # 如果仍然报错，可尝试单独安装 fairseq 并忽略依赖（但可能缺东西）
-          # pip install fairseq
 
       - name: 下载 RMVPE ONNX 模型
         run: |
@@ -112,7 +109,7 @@ jobs:
           ls -lh ./input.wav
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "时长：{} 秒"
 
-      - name: 运行 RVC 转换（ONNX 加速）
+      - name: 运行 RVC 转换（ONNX 加速，使用 infer.py）
         run: |
           echo "=== 开始 RVC 转换 ==="
           START_TIME=$(date +%s)
@@ -122,18 +119,22 @@ jobs:
           echo "音高提取：rmvpe (ONNX)"
           echo "推理中，约 5-10 分钟..."
 
-          cp ./weights/Cerydra_e20_s2400.pth rvc-webui/
-          cp ./input.wav rvc-webui/
           cd rvc-webui
-
-          python infer_cli.py \
-            --model_path ./Cerydra_e20_s2400.pth \
-            --input_path ./input.wav \
+          # 确认 infer.py 存在
+          if [ ! -f "infer.py" ]; then
+            echo "错误：未找到 infer.py，当前目录文件列表："
+            ls -la
+            exit 1
+          fi
+          # 执行推理（使用官方 infer.py，参数名已确认）
+          python infer.py \
+            --model_path ../weights/Cerydra_e20_s2400.pth \
+            --input_path ../input.wav \
             --output_path ./output.mp3 \
             --f0_method rmvpe \
             --use_onnx True \
             --onnx_dir ../onnx_cache
-
+          # 将结果移回根目录
           cp ./output.mp3 ../output.mp3
           cd ..
 
