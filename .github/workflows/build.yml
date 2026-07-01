@@ -81,12 +81,14 @@ jobs:
           path: ~/.cache/rvc
           key: rvc-cache-v2
 
-      # ---------- 仅当缓存未命中时下载 Hubert 模型 ----------
+      # ---------- 仅当缓存未命中时下载 Hubert 模型（手动 wget） ----------
       - name: 下载 Hubert 模型（仅在缓存未命中时）
         if: steps.rvc-cache.outputs.cache-hit != 'true'
         run: |
           echo "首次运行，下载 Hubert 模型（约 300MB）..."
-          python -c "from rvc.lib.tools.prerequisites import download_hubert; download_hubert()"
+          mkdir -p ~/.cache/rvc/hubert
+          wget -q --show-progress -O ~/.cache/rvc/hubert/hubert_base.pt \
+            https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base.pt
           echo "Hubert 模型下载完成"
 
       # ---------- 缓存角色模型 ----------
@@ -142,7 +144,6 @@ jobs:
           TEXT: ${{ inputs.text }}
         run: |
           echo "生成 TTS 干声（文字：${TEXT}）..."
-          # 防御换行符：只取第一行，避免命令截断
           SAFE_TEXT=$(echo "$TEXT" | head -n 1)
           edge-tts --text "${SAFE_TEXT}" --write-media ./input.raw.wav
           ffmpeg -i ./input.raw.wav -ar 48000 -ac 1 ./input.wav -y
@@ -157,7 +158,7 @@ jobs:
           START_TIME=$(date +%s)
           export CUDA_VISIBLE_DEVICES=""
 
-          # 注意：-p 0.33 为微变调（0.33 半音），可改为 0 保持原调
+          # -p 0.33 为微变调（0.33 半音），可改为 0 保持原调
           rvc infer -m assets/weights/huangquan.pth \
                     -i ./input.wav \
                     -o ./output.wav \
@@ -185,9 +186,7 @@ jobs:
           TEXT: ${{ inputs.text }}
         run: |
           TIMESTAMP=$(date +"%Y%m%d%H%M%S")
-          # 过滤非法字符：只保留字母、数字、短横线、下划线
           TEXT_SUFFIX=$(echo "$TEXT" | tr -cd '[:alnum:]_-' | head -c 16)
-          # 若过滤后为空，使用默认值
           [ -z "$TEXT_SUFFIX" ] && TEXT_SUFFIX="voice"
           echo "VERSION=[BOT][$TIMESTAMP][$TEXT]" >> $GITHUB_ENV
           echo "TAG=output-$TIMESTAMP-$TEXT_SUFFIX" >> $GITHUB_ENV
@@ -207,7 +206,6 @@ jobs:
           引擎：官方 RVC CLI (CPU)
           加速：自动 ONNX
           EOF
-          # 展开变量
           envsubst < notes.txt > notes_expanded.txt
           gh release create "$TAG" \
             ./output.mp3 \
