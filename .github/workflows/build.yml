@@ -34,7 +34,7 @@ jobs:
           path: /var/cache/apt/archives
           key: apt-cache-${{ runner.os }}-v3
 
-      - name: 安装系统依赖（含 FFmpeg 开发库和 sox）
+      - name: 安装系统依赖
         run: |
           sudo apt update
           sudo apt install -y \
@@ -56,7 +56,6 @@ jobs:
           path: ~/.cache/pip
           key: pip-cache-${{ runner.os }}-v4
 
-      # ---------- 安装 PyTorch 2.5.1 + RVC CLI ----------
       - name: 安装 PyTorch 2.5.1 + RVC CLI + 依赖
         run: |
           echo "安装 PyTorch 2.5.1 CPU 版..."
@@ -75,7 +74,7 @@ jobs:
           rvc init || echo "rvc init 跳过"
           mkdir -p assets/weights assets/hubert assets/rmvpe
 
-      # ---------- 缓存 RVC 内部缓存 ----------
+      # ---------- 缓存 RVC 内部缓存（含 Hubert） ----------
       - name: 缓存 RVC 内部缓存
         id: rvc-cache
         uses: actions/cache@v4
@@ -83,7 +82,6 @@ jobs:
           path: ~/.cache/rvc
           key: rvc-cache-v2
 
-      # ---------- 下载 Hubert 模型 ----------
       - name: 下载 Hubert 模型（仅在缓存未命中时）
         if: steps.rvc-cache.outputs.cache-hit != 'true'
         run: |
@@ -118,21 +116,13 @@ jobs:
             https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.pt
           ls -lh assets/rmvpe/rmvpe.pt
 
-      # ---------- 设置环境变量 ----------
-      - name: 配置环境变量
-        run: |
-          echo "index_root=$PWD/assets/weights" >> .env
-          echo "hubert_path=$PWD/assets/hubert/hubert_base.pt" >> .env
-          echo "rmvpe_root=$PWD/assets/rmvpe" >> .env
-          cat .env
-
       # ---------- 缓存角色模型 ----------
       - name: 缓存角色模型
         id: cache-pth
         uses: actions/cache@v4
         with:
           path: ./weights
-          key: huangquan-pth-v1
+          key: huangquan-pth-v2
 
       - name: 下载并校验 .pth 模型
         if: steps.cache-pth.outputs.cache-hit != 'true'
@@ -152,8 +142,16 @@ jobs:
           "
           echo "模型校验通过"
 
-      - name: 下载并校验 .index 文件
-        if: steps.cache-pth.outputs.cache-hit != 'true'
+      # ---------- 缓存索引文件 ----------
+      - name: 缓存索引文件
+        id: index-cache
+        uses: actions/cache@v4
+        with:
+          path: ./weights/huangquan.index
+          key: huangquan-index-v1
+
+      - name: 下载索引文件（仅在缓存未命中时）
+        if: steps.index-cache.outputs.cache-hit != 'true'
         run: |
           echo "下载黄泉索引文件..."
           wget -q --show-progress -O ./weights/huangquan.index \
@@ -168,10 +166,36 @@ jobs:
           fi
           echo "索引文件校验通过"
 
+      - name: 验证索引是否可加载
+        run: |
+          python -c "
+          import os
+          import sys
+          sys.path.append(os.getcwd())
+          from rvc.modules.vc.utils import load_index
+          index_path = os.path.abspath('weights/huangquan.index')
+          print(f'尝试加载索引: {index_path}')
+          try:
+              idx = load_index(index_path)
+              print('索引加载成功！')
+          except Exception as e:
+              print(f'索引加载失败: {e}')
+              exit(1)
+          "
+
       - name: 复制模型和索引到规范目录
         run: |
           cp ./weights/huangquan.pth assets/weights/
           cp ./weights/huangquan.index assets/weights/
+
+      # ---------- 设置环境变量 ----------
+      - name: 配置环境变量
+        run: |
+          echo "index_root=$PWD/assets/weights" >> .env
+          echo "hubert_path=$PWD/assets/hubert/hubert_base.pt" >> .env
+          echo "rmvpe_root=$PWD/assets/rmvpe" >> .env
+          echo "index_file=$PWD/assets/weights/huangquan.index" >> .env
+          cat .env
 
       # ---------- 生成 TTS 干声 ----------
       - name: 用 Edge TTS 生成干声
@@ -186,7 +210,7 @@ jobs:
           ls -lh ./input.wav
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "时长：{} 秒"
 
-      # ---------- RVC 推理 ----------
+      # ---------- RVC 推理（使用 index_file 环境变量） ----------
       - name: 运行 RVC 转换
         run: |
           echo "=== 开始 RVC 转换 ==="
@@ -195,11 +219,13 @@ jobs:
           export index_root=$PWD/assets/weights
           export hubert_path=$PWD/assets/hubert/hubert_base.pt
           export rmvpe_root=$PWD/assets/rmvpe
+          export index_file=$PWD/assets/weights/huangquan.index
+
+          ls -lh "$index_file"
 
           rvc infer -m assets/weights/huangquan.pth \
                     -i ./input.wav \
                     -o ./output.wav \
-                    -if assets/weights/huangquan.index \
                     -fm rmvpe \
                     -p 0 \
                     -fu 0
@@ -241,6 +267,7 @@ jobs:
           模型：黄泉 (48k, 含 .index)
           引擎：官方 RVC CLI (CPU)
           PyTorch: 2.5.1 (兼容版)
+          索引: 已加载
           EOF
           envsubst < notes.txt > notes_expanded.txt
           gh release create "$TAG" \
