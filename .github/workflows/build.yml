@@ -71,14 +71,7 @@ jobs:
       - name: 初始化 RVC 环境
         run: |
           rvc init || echo "rvc init 跳过"
-          mkdir -p assets/weights
-
-      # ---------- 设置 index_root 到 .env 文件（避免 NoneType 错误） ----------
-      - name: 配置 index_root 环境变量
-        run: |
-          echo "index_root=$PWD/assets/weights" >> .env
-          echo "index_root 已写入 .env："
-          cat .env | grep index_root
+          mkdir -p assets/weights assets/hubert
 
       # ---------- 缓存 RVC 内部缓存（含 Hubert、ONNX 等）提前恢复 ----------
       - name: 缓存 RVC 内部缓存
@@ -88,7 +81,7 @@ jobs:
           path: ~/.cache/rvc
           key: rvc-cache-v2
 
-      # ---------- 仅当缓存未命中时下载 Hubert 模型（手动 wget） ----------
+      # ---------- 仅当缓存未命中时下载 Hubert 模型 ----------
       - name: 下载 Hubert 模型（仅在缓存未命中时）
         if: steps.rvc-cache.outputs.cache-hit != 'true'
         run: |
@@ -97,6 +90,27 @@ jobs:
           wget -q --show-progress -O ~/.cache/rvc/hubert/hubert_base.pt \
             https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base.pt
           echo "Hubert 模型下载完成"
+
+      # ---------- 将 Hubert 模型复制到 assets/hubert/ ----------
+      - name: 准备 Hubert 模型到 assets
+        run: |
+          # 优先从缓存复制，如果缓存未命中则文件已在 ~/.cache/rvc/hubert/
+          if [ -f ~/.cache/rvc/hubert/hubert_base.pt ]; then
+            cp ~/.cache/rvc/hubert/hubert_base.pt assets/hubert/
+          else
+            # 如果缓存命中但文件不在缓存中（极少情况），直接下载到 assets
+            wget -q -O assets/hubert/hubert_base.pt \
+              https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base.pt
+          fi
+          ls -lh assets/hubert/hubert_base.pt
+
+      # ---------- 设置 index_root 和 hubert_path 到 .env ----------
+      - name: 配置环境变量
+        run: |
+          echo "index_root=$PWD/assets/weights" >> .env
+          echo "hubert_path=$PWD/assets/hubert/hubert_base.pt" >> .env
+          echo "已写入 .env："
+          cat .env
 
       # ---------- 缓存角色模型 ----------
       - name: 缓存角色模型
@@ -164,8 +178,9 @@ jobs:
           echo "=== 开始 RVC 转换 ==="
           START_TIME=$(date +%s)
           export CUDA_VISIBLE_DEVICES=""
-          # 再次确保环境变量（双重保险）
+          # 额外显式设置环境变量（双保险）
           export index_root=$PWD/assets/weights
+          export hubert_path=$PWD/assets/hubert/hubert_base.pt
 
           # -p 0.33 为微变调（0.33 半音），可改为 0 保持原调
           rvc infer -m assets/weights/huangquan.pth \
