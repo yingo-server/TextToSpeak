@@ -201,7 +201,7 @@ jobs:
                     -o ./output.wav \
                     -if assets/weights/huangquan.index \
                     -fm rmvpe \
-                    -p 0.33 \
+                    -p 0 \
                     -fu 0
 
           END_TIME=$(date +%s)
