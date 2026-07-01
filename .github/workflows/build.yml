@@ -1,4 +1,4 @@
-name: 生成角色语音并发布（历史版本留存）
+name: 生成角色语音并发布（RVC CLI 官方用法）
 
 on:
   workflow_dispatch:
@@ -26,7 +26,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
-          key: apt-cache-${{ runner.os }}-v2  # 更新版本号，因新增包
+          key: apt-cache-${{ runner.os }}-v3
 
       - name: 安装系统依赖（含 FFmpeg 开发库）
         run: |
@@ -48,7 +48,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-cache-${{ runner.os }}-v2  # 更新版本号
+          key: pip-cache-${{ runner.os }}-v3
 
       - name: 安装官方 RVC CLI（CPU 版）及 Edge TTS
         run: |
@@ -58,12 +58,15 @@ jobs:
           pip install git+https://github.com/RVC-Project/Retrieval-based-Voice-Conversion.git
           echo "安装 Edge TTS..."
           pip install edge-tts
+          # 验证 rvc 命令
+          which rvc || echo "rvc 命令已安装，但可能不在 PATH 中"
+          rvc --version 2>/dev/null || echo "版本信息获取失败，但继续执行"
 
-      # ---------- RVC 初始化（容错） ----------
+      # ---------- RVC 初始化 ----------
       - name: 初始化 RVC 环境
         run: |
-          echo "运行 rvc init（若失败则跳过）..."
-          rvc init || python -m rvc.cli init || echo "初始化跳过，继续执行"
+          echo "运行 rvc init..."
+          rvc init || echo "rvc init 失败（可能已存在），继续执行"
           mkdir -p assets/weights
 
       # ---------- 缓存角色模型 ----------
@@ -103,13 +106,12 @@ jobs:
         run: |
           echo "生成 TTS 干声（文字：败者成灰，胜者为王）..."
           edge-tts --text "败者成灰，胜者为王" --write-media ./input.raw.wav
-          # 重采样为标准格式（16kHz 单声道），提高兼容性
           ffmpeg -i ./input.raw.wav -ar 16000 -ac 1 ./input.wav -y
           echo "干声文件信息："
           ls -lh ./input.wav
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "时长：{} 秒"
 
-      # ---------- 运行 RVC 推理 ----------
+      # ---------- 运行 RVC 推理（官方短选项） ----------
       - name: 运行 RVC 转换
         run: |
           echo "=== 开始 RVC 转换 ==="
@@ -121,14 +123,13 @@ jobs:
 
           export CUDA_VISIBLE_DEVICES=""
 
-          # 统一使用 python -m rvc.cli 方式，避免命令查找问题
-          python -m rvc.cli infer \
-            --model_path assets/weights/Cerydra_e20_s2400.pth \
-            --input_path ./input.wav \
-            --output_path ./output.wav \
-            --f0_method rmvpe \
-            --protect 0.33 \
-            --f0_up_key 0
+          # 使用官方文档指定的短选项
+          rvc infer -m assets/weights/Cerydra_e20_s2400.pth \
+                    -i ./input.wav \
+                    -o ./output.wav \
+                    -fm rmvpe \
+                    -p 0.33 \
+                    -fu 0
 
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
@@ -153,10 +154,9 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
           echo "Release 标题：$VERSION"
-          # Tag 包含时间戳，确保每个版本独立
           echo "TAG=output-$TIMESTAMP" >> $GITHUB_ENV
 
-      # ---------- 发布新 Release（不覆盖历史） ----------
+      # ---------- 发布新 Release ----------
       - name: 创建 Release
         run: |
           echo "创建 Release（Tag: ${{ env.TAG }}）..."
