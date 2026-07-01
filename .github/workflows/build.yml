@@ -72,7 +72,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ./weights
-          key: huangquan-pth-v1   # 独立缓存键
+          key: huangquan-pth-v1
 
       - name: 下载并校验 .pth 模型
         if: steps.cache-pth.outputs.cache-hit != 'true'
@@ -81,9 +81,6 @@ jobs:
           echo "下载黄泉模型 (huangquan.pth)..."
           wget -q --show-progress -O ./weights/huangquan.pth \
             https://github.com/yingo-server/TextToSpeak/releases/download/%E9%BB%84%E6%B3%89/huangquan.pth
-
-          # 校验模型是否可加载
-          echo "校验模型文件是否可加载..."
           python -c "
           import torch
           try:
@@ -98,20 +95,16 @@ jobs:
       - name: 下载并校验 .index 文件
         if: steps.cache-pth.outputs.cache-hit != 'true'
         run: |
-          echo "下载黄泉索引文件 (added_IVF1982_Flat_nprobe_1_default_exp_name_v2.index)..."
+          echo "下载黄泉索引文件..."
           wget -q --show-progress -O ./weights/huangquan.index \
             https://github.com/yingo-server/TextToSpeak/releases/download/%E9%BB%84%E6%B3%89/added_IVF1982_Flat_nprobe_1_default_exp_name_v2.index
-
-          # 校验索引文件是否存在且大小正常
           if [ ! -f ./weights/huangquan.index ]; then
-            echo "错误：索引文件下载失败"
-            exit 1
+            echo "错误：索引文件下载失败" && exit 1
           fi
-          ACTUAL_SIZE=$(stat -c%s ./weights/huangquan.index)
-          echo "索引文件大小: $ACTUAL_SIZE 字节"
-          if [ "$ACTUAL_SIZE" -lt 1000 ]; then
-            echo "错误：索引文件大小异常（可能下载不完整）"
-            exit 1
+          SIZE=$(stat -c%s ./weights/huangquan.index)
+          echo "索引文件大小: $SIZE 字节"
+          if [ "$SIZE" -lt 1000 ]; then
+            echo "错误：索引文件大小异常" && exit 1
           fi
           echo "索引文件校验通过"
 
@@ -136,18 +129,18 @@ jobs:
           ls -lh ./input.wav
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "时长：{} 秒"
 
-      # ---------- RVC 推理（使用索引） ----------
+      # ---------- RVC 推理（使用 -if 指定索引） ----------
       - name: 运行 RVC 转换
         run: |
           echo "=== 开始 RVC 转换 ==="
           START_TIME=$(date +%s)
           export CUDA_VISIBLE_DEVICES=""
 
-          # 使用 -idx 参数指定索引文件
+          # 使用 -if 指定索引文件
           rvc infer -m assets/weights/huangquan.pth \
                     -i ./input.wav \
                     -o ./output.wav \
-                    -idx assets/weights/huangquan.index \
+                    -if assets/weights/huangquan.index \
                     -fm rmvpe \
                     -p 0.33 \
                     -fu 0
