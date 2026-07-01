@@ -1,4 +1,4 @@
-name: 生成角色语音并发布（自定义推理脚本 v2）
+name: 生成角色语音并发布（最终稳定版）
 
 on:
   workflow_dispatch:
@@ -47,8 +47,8 @@ jobs:
         run: |
           echo "安装 CPU 版 PyTorch..."
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-          echo "安装 ONNX Runtime、Edge TTS 和 torchcrepe..."
-          pip install edge-tts onnxruntime torchcrepe librosa soundfile
+          echo "安装 ONNX Runtime、Edge TTS、torchcrepe、soundfile、librosa..."
+          pip install edge-tts onnxruntime torchcrepe soundfile librosa
 
       - name: 克隆 RVC-WebUI 仓库
         run: |
@@ -61,12 +61,17 @@ jobs:
       - name: 安装 RVC 依赖（解决 omegaconf 冲突）
         run: |
           cd rvc-webui
+          # 降级 pip 以兼容旧版 omegaconf 元数据
           pip install pip==23.3.1
+          # 移除 torch 和 torchvision 行（已安装 CPU 版）
           sed -i '/^torch/d' requirements.txt
           sed -i '/^torchvision/d' requirements.txt
+          # 移除 onnxruntime-gpu（改用 CPU 版）
           sed -i '/^onnxruntime-gpu/d' requirements.txt
+          # 安装依赖
           pip install -r requirements.txt
-          pip install torchcrepe  # 确保安装
+          # 额外安装可能缺失的包
+          pip install torchcrepe fairseq
 
       - name: 下载 RMVPE ONNX 模型
         run: |
@@ -104,39 +109,53 @@ jobs:
           import sys
           import os
           sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+          from configs.config import Config
           from infer.modules.vc.modules import VC
-          import soundfile as sf
-          import librosa
-          import numpy as np
 
           def main():
               model_path = sys.argv[1]
               input_path = sys.argv[2]
               output_path = sys.argv[3]
               f0_method = sys.argv[4] if len(sys.argv) > 4 else "rmvpe"
-              use_onnx = sys.argv[5].lower() == "true" if len(sys.argv) > 5 else False
-              onnx_dir = sys.argv[6] if len(sys.argv) > 6 else None
 
-              # 读取音频
-              audio, sr = sf.read(input_path)
-              if sr != 40000:
-                  audio = librosa.resample(audio, orig_sr=sr, target_sr=40000)
+              config = Config()
+              # 设置权重目录为上级目录的 weights
+              config.weight_root = os.path.abspath("../weights")
+              config.onnx_dir = os.path.abspath("../onnx_cache")
+              config.use_onnx = True
+              os.makedirs(config.weight_root, exist_ok=True)
+              os.makedirs(config.onnx_dir, exist_ok=True)
 
-              # 初始化 VC
-              vc = VC()
-              # 加载模型
-              vc.load_model(model_path, onnx=use_onnx, onnx_dir=onnx_dir)
-              # 尝试调用 process 方法
-              try:
-                  converted = vc.process(audio, f0_method=f0_method, f0_up_key=0)
-              except AttributeError:
-                  try:
-                      converted = vc.vc_transform(audio, f0_method=f0_method, f0_up_key=0)
-                  except AttributeError:
-                      converted = vc.process_audio(audio, f0_method=f0_method, f0_up_key=0)
-              # 保存
-              sf.write(output_path, converted, 40000)
-              print(f"转换完成，输出：{output_path}")
+              vc = VC(config)
+              sid = 0
+              vc.get_vc(sid)  # 加载模型
+
+              # 推理参数（默认值）
+              vc_transform = 0
+              f0_file = None
+              file_index = ""
+              file_index2 = ""
+              index_rate = 0.75
+              filter_radius = 3
+              resample_sr = 0
+              rms_mix_rate = 0.25
+              protect = 0.33
+
+              info, audio_data = vc.vc_single(
+                  sid, input_path, vc_transform, f0_file, f0_method,
+                  file_index, file_index2, index_rate, filter_radius,
+                  resample_sr, rms_mix_rate, protect
+              )
+              print(info)
+              # 保存音频
+              if isinstance(audio_data, tuple) and len(audio_data) == 2:
+                  sr, audio = audio_data
+                  import soundfile as sf
+                  sf.write(output_path, audio, sr)
+              else:
+                  import shutil
+                  shutil.copy(audio_data, output_path)
+              print("转换完成，输出：", output_path)
 
           if __name__ == "__main__":
               main()
@@ -162,7 +181,7 @@ jobs:
           echo "推理中，约 5-10 分钟..."
 
           cd rvc-webui
-          python run_infer.py ../weights/Cerydra_e20_s2400.pth ../input.wav ../output.mp3 rmvpe True ../onnx_cache
+          python run_infer.py ../weights/Cerydra_e20_s2400.pth ../input.wav ../output.mp3 rmvpe
           cd ..
 
           END_TIME=$(date +%s)
