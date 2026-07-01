@@ -56,28 +56,24 @@ jobs:
           path: ~/.cache/pip
           key: pip-cache-${{ runner.os }}-v4
 
-      # ---------- 安装 PyTorch 2.5.1 及 RVC CLI ----------
+      # ---------- 安装 PyTorch 2.5.1 + RVC CLI ----------
       - name: 安装 PyTorch 2.5.1 + RVC CLI + 依赖
         run: |
-          echo "安装 PyTorch 2.5.1 CPU 版（兼容 RVC 模型加载）..."
+          echo "安装 PyTorch 2.5.1 CPU 版..."
           pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
           echo "安装官方 RVC CLI（固定 commit）..."
           RVC_COMMIT="7b284a634667c34103eaaeed972b48ccdb4b893e"
           pip install git+https://github.com/RVC-Project/Retrieval-based-Voice-Conversion.git@${RVC_COMMIT}
-          echo "显式安装 fairseq（确保版本一致）..."
-          pip install fairseq
-          echo "安装 Edge TTS..."
-          pip install edge-tts
-          # 打印关键包版本，便于调试
+          echo "安装 fairseq 和 Edge TTS..."
+          pip install fairseq edge-tts
           python -c "import torch; print(f'PyTorch: {torch.__version__}')"
-          python -c "import fairseq; print(f'fairseq: {fairseq.__version__}')"
           rvc --version || true
 
       # ---------- RVC 初始化 ----------
       - name: 初始化 RVC 环境
         run: |
           rvc init || echo "rvc init 跳过"
-          mkdir -p assets/weights assets/hubert
+          mkdir -p assets/weights assets/hubert assets/rmvpe
 
       # ---------- 缓存 RVC 内部缓存 ----------
       - name: 缓存 RVC 内部缓存
@@ -95,7 +91,6 @@ jobs:
           mkdir -p ~/.cache/rvc/hubert
           wget -q --show-progress -O ~/.cache/rvc/hubert/hubert_base.pt \
             https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base.pt
-          echo "Hubert 模型下载完成"
 
       - name: 准备 Hubert 模型到 assets
         run: |
@@ -107,11 +102,28 @@ jobs:
           fi
           ls -lh assets/hubert/hubert_base.pt
 
+      # ---------- 缓存 RMVPE 模型 ----------
+      - name: 缓存 RMVPE 模型
+        id: rmvpe-cache
+        uses: actions/cache@v4
+        with:
+          path: assets/rmvpe
+          key: rmvpe-v1
+
+      - name: 下载 RMVPE 模型（仅在缓存未命中时）
+        if: steps.rmvpe-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "下载 RMVPE 模型（约 20MB）..."
+          wget -q --show-progress -O assets/rmvpe/rmvpe.pt \
+            https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.pt
+          ls -lh assets/rmvpe/rmvpe.pt
+
       # ---------- 设置环境变量 ----------
       - name: 配置环境变量
         run: |
           echo "index_root=$PWD/assets/weights" >> .env
           echo "hubert_path=$PWD/assets/hubert/hubert_base.pt" >> .env
+          echo "rmvpe_root=$PWD/assets/rmvpe" >> .env
           cat .env
 
       # ---------- 缓存角色模型 ----------
@@ -174,7 +186,7 @@ jobs:
           ls -lh ./input.wav
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "时长：{} 秒"
 
-      # ---------- RVC 推理（PyTorch 2.5.1 自动兼容） ----------
+      # ---------- RVC 推理 ----------
       - name: 运行 RVC 转换
         run: |
           echo "=== 开始 RVC 转换 ==="
@@ -182,6 +194,7 @@ jobs:
           export CUDA_VISIBLE_DEVICES=""
           export index_root=$PWD/assets/weights
           export hubert_path=$PWD/assets/hubert/hubert_base.pt
+          export rmvpe_root=$PWD/assets/rmvpe
 
           rvc infer -m assets/weights/huangquan.pth \
                     -i ./input.wav \
