@@ -129,14 +129,15 @@ jobs:
           ls -lh ./input.wav
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "时长：{} 秒"
 
-      # ---------- RVC 推理（使用 -if 指定索引） ----------
+      # ---------- RVC 推理（设置 index_root 环境变量） ----------
       - name: 运行 RVC 转换
         run: |
           echo "=== 开始 RVC 转换 ==="
           START_TIME=$(date +%s)
           export CUDA_VISIBLE_DEVICES=""
+          # 关键修复：设置 index_root 环境变量，避免自动查找索引时出错
+          export index_root=assets/weights
 
-          # 使用 -if 指定索引文件
           rvc infer -m assets/weights/huangquan.pth \
                     -i ./input.wav \
                     -o ./output.wav \
