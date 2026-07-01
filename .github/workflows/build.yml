@@ -65,7 +65,8 @@ jobs:
           pip install git+https://github.com/RVC-Project/Retrieval-based-Voice-Conversion.git@${RVC_COMMIT}
           echo "安装 Edge TTS..."
           pip install edge-tts
-          rvc --version || true
+          # 额外安装 fairseq 以便处理 Dictionary
+          pip install fairseq
 
       # ---------- RVC 初始化 ----------
       - name: 初始化 RVC 环境
@@ -170,23 +171,70 @@ jobs:
           ls -lh ./input.wav
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "时长：{} 秒"
 
-      # ---------- RVC 推理（终极修复：强制 weights_only=False） ----------
-      - name: 运行 RVC 转换
+      # ---------- 自定义 Python 推理脚本（绕过 CLI，直接解决 weights_only） ----------
+      - name: 运行 RVC 转换（Python 脚本）
         run: |
           echo "=== 开始 RVC 转换 ==="
           START_TIME=$(date +%s)
           export CUDA_VISIBLE_DEVICES=""
-          export PYTORCH_FORCE_WEIGHTS_ONLY=0
           export index_root=$PWD/assets/weights
           export hubert_path=$PWD/assets/hubert/hubert_base.pt
 
-          rvc infer -m assets/weights/huangquan.pth \
-                    -i ./input.wav \
-                    -o ./output.wav \
-                    -if assets/weights/huangquan.index \
-                    -fm rmvpe \
-                    -p 0.33 \
-                    -fu 0
+          python << 'EOF'
+          import os
+          import sys
+          import torch
+          import fairseq.data.dictionary
+          # ===== 关键修复：添加 safe global =====
+          torch.serialization.add_safe_globals([fairseq.data.dictionary.Dictionary])
+
+          # 设置路径
+          sys.path.append(os.getcwd())
+          from configs.config import Config
+          from rvc.modules.vc.modules import VC
+          import soundfile as sf
+          import numpy as np
+
+          model_path = "assets/weights/huangquan.pth"
+          input_wav = "input.wav"
+          output_wav = "output.wav"
+          index_path = "assets/weights/huangquan.index"
+          f0_method = "rmvpe"
+          protect = 0.33
+          f0_up_key = 0
+
+          # 加载配置
+          config = Config()
+          config.weight_root = "assets/weights"
+          config.index_root = "assets/weights"
+          config.hubert_path = os.environ.get("hubert_path", "assets/hubert/hubert_base.pt")
+          config.device = "cpu"
+          config.is_half = False
+
+          vc = VC(config)
+          # 加载模型
+          vc.get_vc(model_path)
+          # 加载索引（如果存在）
+          if os.path.exists(index_path):
+              vc.get_index(index_path)
+              print(f"已加载索引: {index_path}")
+          else:
+              print("警告：未找到索引文件，将不使用索引")
+
+          # 推理
+          sid = 0
+          tgt_sr, audio_opt, times, _ = vc.vc_inference(
+              sid,
+              input_wav,
+              f0_up_key,
+              f0_method,
+              index_path,
+              protect
+          )
+          # 保存音频
+          sf.write(output_wav, audio_opt, tgt_sr)
+          print(f"推理完成，输出: {output_wav}")
+          EOF
 
           END_TIME=$(date +%s)
           echo "推理完成，耗时：$((END_TIME - START_TIME)) 秒"
