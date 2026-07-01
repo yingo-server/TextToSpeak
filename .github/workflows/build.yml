@@ -94,11 +94,9 @@ jobs:
       # ---------- 将 Hubert 模型复制到 assets/hubert/ ----------
       - name: 准备 Hubert 模型到 assets
         run: |
-          # 优先从缓存复制，如果缓存未命中则文件已在 ~/.cache/rvc/hubert/
           if [ -f ~/.cache/rvc/hubert/hubert_base.pt ]; then
             cp ~/.cache/rvc/hubert/hubert_base.pt assets/hubert/
           else
-            # 如果缓存命中但文件不在缓存中（极少情况），直接下载到 assets
             wget -q -O assets/hubert/hubert_base.pt \
               https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base.pt
           fi
@@ -172,17 +170,18 @@ jobs:
           ls -lh ./input.wav
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "时长：{} 秒"
 
-      # ---------- RVC 推理 ----------
+      # ---------- RVC 推理（解决 weights_only 问题） ----------
       - name: 运行 RVC 转换
         run: |
           echo "=== 开始 RVC 转换 ==="
           START_TIME=$(date +%s)
           export CUDA_VISIBLE_DEVICES=""
-          # 额外显式设置环境变量（双保险）
+          # 关键修复：强制 PyTorch 使用旧版加载方式
+          export PYTORCH_FORCE_WEIGHTS_ONLY=0
+          # 双保险环境变量
           export index_root=$PWD/assets/weights
           export hubert_path=$PWD/assets/hubert/hubert_base.pt
 
-          # -p 0.33 为微变调（0.33 半音），可改为 0 保持原调
           rvc infer -m assets/weights/huangquan.pth \
                     -i ./input.wav \
                     -o ./output.wav \
