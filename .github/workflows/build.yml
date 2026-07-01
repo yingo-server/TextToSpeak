@@ -73,6 +73,13 @@ jobs:
           rvc init || echo "rvc init 跳过"
           mkdir -p assets/weights
 
+      # ---------- 设置 index_root 到 .env 文件（避免 NoneType 错误） ----------
+      - name: 配置 index_root 环境变量
+        run: |
+          echo "index_root=$PWD/assets/weights" >> .env
+          echo "index_root 已写入 .env："
+          cat .env | grep index_root
+
       # ---------- 缓存 RVC 内部缓存（含 Hubert、ONNX 等）提前恢复 ----------
       - name: 缓存 RVC 内部缓存
         id: rvc-cache
@@ -157,6 +164,8 @@ jobs:
           echo "=== 开始 RVC 转换 ==="
           START_TIME=$(date +%s)
           export CUDA_VISIBLE_DEVICES=""
+          # 再次确保环境变量（双重保险）
+          export index_root=$PWD/assets/weights
 
           # -p 0.33 为微变调（0.33 半音），可改为 0 保持原调
           rvc infer -m assets/weights/huangquan.pth \
