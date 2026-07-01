@@ -1,4 +1,4 @@
-name: 生成角色语音并发布（RVC CLI 官方用法）
+name: 生成黄泉角色语音并发布
 
 on:
   workflow_dispatch:
@@ -58,113 +58,126 @@ jobs:
           pip install git+https://github.com/RVC-Project/Retrieval-based-Voice-Conversion.git
           echo "安装 Edge TTS..."
           pip install edge-tts
-          # 验证 rvc 命令
-          which rvc || echo "rvc 命令已安装，但可能不在 PATH 中"
-          rvc --version 2>/dev/null || echo "版本信息获取失败，但继续执行"
+          rvc --version || true
 
       # ---------- RVC 初始化 ----------
       - name: 初始化 RVC 环境
         run: |
-          echo "运行 rvc init..."
-          rvc init || echo "rvc init 失败（可能已存在），继续执行"
+          rvc init || echo "rvc init 跳过"
           mkdir -p assets/weights
 
-      # ---------- 缓存角色模型 ----------
+      # ---------- 缓存模型文件 ----------
       - name: 缓存角色模型
         id: cache-pth
         uses: actions/cache@v4
         with:
           path: ./weights
-          key: cerydra-pth-v1
+          key: huangquan-pth-v1   # 独立缓存键
 
-      - name: 下载角色模型（若缓存未命中）
+      - name: 下载并校验 .pth 模型
         if: steps.cache-pth.outputs.cache-hit != 'true'
         run: |
           mkdir -p weights
-          echo "下载刻律德菈模型 (164MB)..."
-          wget -q --show-progress -O ./weights/Cerydra_e20_s2400.pth \
-            https://github.com/yingo-server/TextToSpeak/releases/download/cerydra/Cerydra_e20_s2400.pth
-          ls -lh ./weights/Cerydra_e20_s2400.pth
+          echo "下载黄泉模型 (huangquan.pth)..."
+          wget -q --show-progress -O ./weights/huangquan.pth \
+            https://github.com/yingo-server/TextToSpeak/releases/download/%E9%BB%84%E6%B3%89/huangquan.pth
 
-      - name: 验证并复制模型到规范目录
+          # 校验模型是否可加载
+          echo "校验模型文件是否可加载..."
+          python -c "
+          import torch
+          try:
+              ckpt = torch.load('./weights/huangquan.pth', map_location='cpu')
+              print('模型加载成功，keys:', list(ckpt.keys()))
+          except Exception as e:
+              print('模型加载失败:', e)
+              exit(1)
+          "
+          echo "模型校验通过"
+
+      - name: 下载并校验 .index 文件
+        if: steps.cache-pth.outputs.cache-hit != 'true'
         run: |
-          if [ -f ./weights/Cerydra_e20_s2400.pth ]; then
-            cp ./weights/Cerydra_e20_s2400.pth assets/weights/
-          else
-            echo "错误：模型文件不存在" && exit 1
-          fi
+          echo "下载黄泉索引文件 (added_IVF1982_Flat_nprobe_1_default_exp_name_v2.index)..."
+          wget -q --show-progress -O ./weights/huangquan.index \
+            https://github.com/yingo-server/TextToSpeak/releases/download/%E9%BB%84%E6%B3%89/added_IVF1982_Flat_nprobe_1_default_exp_name_v2.index
 
-      # ---------- 缓存 RVC 内部缓存（含 ONNX） ----------
+          # 校验索引文件是否存在且大小正常
+          if [ ! -f ./weights/huangquan.index ]; then
+            echo "错误：索引文件下载失败"
+            exit 1
+          fi
+          ACTUAL_SIZE=$(stat -c%s ./weights/huangquan.index)
+          echo "索引文件大小: $ACTUAL_SIZE 字节"
+          if [ "$ACTUAL_SIZE" -lt 1000 ]; then
+            echo "错误：索引文件大小异常（可能下载不完整）"
+            exit 1
+          fi
+          echo "索引文件校验通过"
+
+      - name: 复制模型和索引到规范目录
+        run: |
+          cp ./weights/huangquan.pth assets/weights/
+          cp ./weights/huangquan.index assets/weights/
+
+      # ---------- 缓存 RVC 内部缓存 ----------
       - name: 缓存 RVC 内部缓存
         uses: actions/cache@v4
         with:
           path: ~/.cache/rvc
           key: rvc-cache-v1
 
-      # ---------- 生成 TTS 干声并标准化 ----------
+      # ---------- 生成 TTS 干声 ----------
       - name: 用 Edge TTS 生成干声
         run: |
           echo "生成 TTS 干声（文字：败者成灰，胜者为王）..."
           edge-tts --text "败者成灰，胜者为王" --write-media ./input.raw.wav
           ffmpeg -i ./input.raw.wav -ar 16000 -ac 1 ./input.wav -y
-          echo "干声文件信息："
           ls -lh ./input.wav
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "时长：{} 秒"
 
-      # ---------- 运行 RVC 推理（官方短选项） ----------
+      # ---------- RVC 推理（使用索引） ----------
       - name: 运行 RVC 转换
         run: |
           echo "=== 开始 RVC 转换 ==="
           START_TIME=$(date +%s)
-          echo "模型：assets/weights/Cerydra_e20_s2400.pth"
-          echo "输入：./input.wav"
-          echo "音高提取：rmvpe（自动 ONNX 加速）"
-          echo "推理中，约 3-6 分钟..."
-
           export CUDA_VISIBLE_DEVICES=""
 
-          # 使用官方文档指定的短选项
-          rvc infer -m assets/weights/Cerydra_e20_s2400.pth \
+          # 使用 -idx 参数指定索引文件
+          rvc infer -m assets/weights/huangquan.pth \
                     -i ./input.wav \
                     -o ./output.wav \
+                    -idx assets/weights/huangquan.index \
                     -fm rmvpe \
                     -p 0.33 \
                     -fu 0
 
           END_TIME=$(date +%s)
-          DURATION=$((END_TIME - START_TIME))
-          echo "推理完成，耗时：${DURATION} 秒 ($((DURATION/60)) 分 $((DURATION%60)) 秒)"
+          echo "推理完成，耗时：$((END_TIME - START_TIME)) 秒"
 
-      # ---------- 检查输出并转码为 MP3 ----------
+      # ---------- 转码为 MP3 ----------
       - name: 转码为 MP3
         run: |
           if [ ! -f ./output.wav ]; then
             echo "错误：推理未生成输出文件" && exit 1
           fi
-          echo "转换 WAV 为 MP3..."
           ffmpeg -i ./output.wav -codec:a libmp3lame -q:a 2 ./output.mp3 -y
           ls -lh ./output.mp3
 
-      # ---------- 生成版本号（含时间戳） ----------
+      # ---------- 发布 Release ----------
       - name: 生成版本号
         id: version
         run: |
           TIMESTAMP=$(date +"%Y%m%d%H%M%S")
-          VERSION="[BOT][$TIMESTAMP][败者成灰，胜者为王]"
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
-          echo "Release 标题：$VERSION"
+          echo "VERSION=[BOT][$TIMESTAMP][败者成灰，胜者为王]" >> $GITHUB_ENV
           echo "TAG=output-$TIMESTAMP" >> $GITHUB_ENV
 
-      # ---------- 发布新 Release ----------
       - name: 创建 Release
         run: |
-          echo "创建 Release（Tag: ${{ env.TAG }}）..."
           gh release create "${{ env.TAG }}" \
             ./output.mp3 \
             --title "${{ env.VERSION }}" \
-            --notes "自动生成于 $(date '+%Y-%m-%d %H:%M:%S')\n文字：败者成灰，胜者为王\n模型：刻律德菈 (无.index)\n引擎：官方 RVC CLI (CPU)\n加速：自动 ONNX" \
+            --notes "自动生成于 $(date '+%Y-%m-%d %H:%M:%S')\n文字：败者成灰，胜者为王\n模型：黄泉 (含 .index)\n引擎：官方 RVC CLI (CPU)\n加速：自动 ONNX" \
             --target ${{ github.sha }}
-          echo "Release 创建成功！"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
