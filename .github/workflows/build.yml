@@ -10,10 +10,9 @@ jobs:
       contents: write
 
     steps:
-      - name: 检出仓库（用于后续 Release）
+      - name: 检出仓库
         uses: actions/checkout@v4
 
-      # ---------- 1. 系统信息 ----------
       - name: 打印系统信息
         run: |
           echo "=== 系统信息 ==="
@@ -22,7 +21,6 @@ jobs:
           free -h
           df -h .
 
-      # ---------- 2. APT 缓存 ----------
       - name: 缓存 APT 软件包
         uses: actions/cache@v4
         with:
@@ -34,7 +32,6 @@ jobs:
           sudo apt update
           sudo apt install ffmpeg git -y
 
-      # ---------- 3. Python 环境 ----------
       - name: 设置 Python 3.10
         uses: actions/setup-python@v5
         with:
@@ -46,14 +43,13 @@ jobs:
           path: ~/.cache/pip
           key: pip-cache-${{ runner.os }}-v1
 
-      - name: 安装 Python 依赖（CPU PyTorch + ONNX）
+      - name: 安装 Python 基础依赖（CPU PyTorch + ONNX + Edge TTS）
         run: |
           echo "安装 CPU 版 PyTorch..."
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
           echo "安装 ONNX Runtime 和 Edge TTS..."
           pip install edge-tts onnxruntime
 
-      # ---------- 4. 克隆官方 RVC-WebUI（浅克隆，速度快）----------
       - name: 克隆 RVC-WebUI 仓库
         run: |
           echo "克隆官方 RVC 引擎..."
@@ -62,20 +58,23 @@ jobs:
           echo "仓库克隆完成，大小："
           du -sh .
 
-      # ---------- 5. 安装 RVC 依赖（跳过 torch，使用已安装的 CPU 版）----------
-      - name: 安装 RVC 依赖
+      - name: 安装 RVC 依赖（解决 omegaconf 冲突）
         run: |
           cd rvc-webui
-          # 注释掉 requirements.txt 中的 torch 行，避免重新安装 CUDA 版本
+          # 降级 pip 以兼容旧版 omegaconf 元数据
+          pip install pip==23.3.1
+          # 移除 torch 和 torchvision 行（已安装 CPU 版）
           sed -i '/^torch/d' requirements.txt
           sed -i '/^torchvision/d' requirements.txt
-          # 安装其余依赖
+          # 移除 onnxruntime-gpu（改用 CPU 版）
+          sed -i '/^onnxruntime-gpu/d' requirements.txt
+          # 安装依赖
           pip install -r requirements.txt
-          # 额外安装可能缺失的包
-          pip install fairseq
+          # 显式安装 fairseq（确保安装，若已包含则跳过）
+          # 如果仍然报错，可尝试单独安装 fairseq 并忽略依赖（但可能缺东西）
+          # pip install fairseq
 
-      # ---------- 6. 下载 RMVPE ONNX 模型 ----------
-      - name: 下载音高提取模型
+      - name: 下载 RMVPE ONNX 模型
         run: |
           mkdir -p rvc-webui/assets
           echo "下载 rmvpe.onnx ..."
@@ -83,7 +82,6 @@ jobs:
             https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.onnx
           ls -lh rvc-webui/assets/rmvpe.onnx
 
-      # ---------- 7. 缓存角色模型（.pth） ----------
       - name: 缓存角色模型
         id: cache-pth
         uses: actions/cache@v4
@@ -100,14 +98,12 @@ jobs:
             https://github.com/yingo-server/TextToSpeak/releases/download/cerydra/Cerydra_e20_s2400.pth
           ls -lh ./weights/Cerydra_e20_s2400.pth
 
-      # ---------- 8. 缓存 ONNX 转换后的模型（加速推理） ----------
       - name: 缓存 ONNX 量化模型
         uses: actions/cache@v4
         with:
           path: ./onnx_cache
           key: cerydra-onnx-v1
 
-      # ---------- 9. 生成 TTS 干声 ----------
       - name: 用 Edge TTS 生成干声
         run: |
           echo "生成 TTS 干声（文字：败者成灰，胜者为王）..."
@@ -116,7 +112,6 @@ jobs:
           ls -lh ./input.wav
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "时长：{} 秒"
 
-      # ---------- 10. RVC 推理（官方脚本 + ONNX） ----------
       - name: 运行 RVC 转换（ONNX 加速）
         run: |
           echo "=== 开始 RVC 转换 ==="
@@ -127,12 +122,10 @@ jobs:
           echo "音高提取：rmvpe (ONNX)"
           echo "推理中，约 5-10 分钟..."
 
-          # 将模型和输入复制到 rvc-webui 目录
           cp ./weights/Cerydra_e20_s2400.pth rvc-webui/
           cp ./input.wav rvc-webui/
           cd rvc-webui
 
-          # 执行推理（注意参数名）
           python infer_cli.py \
             --model_path ./Cerydra_e20_s2400.pth \
             --input_path ./input.wav \
@@ -141,7 +134,6 @@ jobs:
             --use_onnx True \
             --onnx_dir ../onnx_cache
 
-          # 将输出移回原目录
           cp ./output.mp3 ../output.mp3
           cd ..
 
@@ -150,7 +142,6 @@ jobs:
           echo "转换完成，总耗时：${DURATION} 秒 ($((DURATION/60)) 分 $((DURATION%60)) 秒)"
           ls -lh ./output.mp3
 
-      # ---------- 11. 准备 Release ----------
       - name: 生成版本号
         id: version
         run: |
