@@ -109,7 +109,7 @@ jobs:
           ls -lh ./input.wav
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "时长：{} 秒"
 
-      - name: 运行 RVC 转换（ONNX 加速，使用 infer.py）
+      - name: 运行 RVC 转换（ONNX 加速，使用 infer-web.py）
         run: |
           echo "=== 开始 RVC 转换 ==="
           START_TIME=$(date +%s)
@@ -120,14 +120,14 @@ jobs:
           echo "推理中，约 5-10 分钟..."
 
           cd rvc-webui
-          # 确认 infer.py 存在
-          if [ ! -f "infer.py" ]; then
-            echo "错误：未找到 infer.py，当前目录文件列表："
+          # 确认 infer-web.py 存在
+          if [ ! -f "infer-web.py" ]; then
+            echo "错误：未找到 infer-web.py，当前目录文件列表："
             ls -la
             exit 1
           fi
-          # 执行推理（使用官方 infer.py，参数名已确认）
-          python infer.py \
+          # 执行推理
+          python infer-web.py \
             --model_path ../weights/Cerydra_e20_s2400.pth \
             --input_path ../input.wav \
             --output_path ./output.mp3 \
