@@ -1,4 +1,4 @@
-name: 生成角色语音并发布（最终稳定版）
+name: 生成角色语音并发布（历史版本留存）
 
 on:
   workflow_dispatch:
@@ -21,17 +21,19 @@ jobs:
           free -h
           df -h .
 
+      # ---------- APT 缓存 ----------
       - name: 缓存 APT 软件包
         uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
           key: apt-cache-${{ runner.os }}-v1
 
-      - name: 安装系统依赖
+      - name: 安装系统依赖（含音频库）
         run: |
           sudo apt update
-          sudo apt install ffmpeg git -y
+          sudo apt install -y ffmpeg git libsndfile1 libsox-dev
 
+      # ---------- Python 环境 ----------
       - name: 设置 Python 3.10
         uses: actions/setup-python@v5
         with:
@@ -43,44 +45,23 @@ jobs:
           path: ~/.cache/pip
           key: pip-cache-${{ runner.os }}-v1
 
-      - name: 安装 Python 基础依赖（CPU PyTorch + ONNX + Edge TTS）
+      - name: 安装官方 RVC CLI（CPU 版）及 Edge TTS
         run: |
           echo "安装 CPU 版 PyTorch..."
           pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-          echo "安装 ONNX Runtime、Edge TTS、torchcrepe、soundfile、librosa..."
-          pip install edge-tts onnxruntime torchcrepe soundfile librosa
+          echo "安装官方 RVC CLI..."
+          pip install git+https://github.com/RVC-Project/Retrieval-based-Voice-Conversion.git
+          echo "安装 Edge TTS..."
+          pip install edge-tts
 
-      - name: 克隆 RVC-WebUI 仓库
+      # ---------- RVC 初始化（容错） ----------
+      - name: 初始化 RVC 环境
         run: |
-          echo "克隆官方 RVC 引擎..."
-          git clone --depth=1 https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI.git rvc-webui
-          cd rvc-webui
-          echo "仓库克隆完成，大小："
-          du -sh .
+          echo "运行 rvc init（若失败则跳过）..."
+          rvc init || python -m rvc.cli init || echo "初始化跳过，继续执行"
+          mkdir -p assets/weights
 
-      - name: 安装 RVC 依赖（解决 omegaconf 冲突）
-        run: |
-          cd rvc-webui
-          # 降级 pip 以兼容旧版 omegaconf 元数据
-          pip install pip==23.3.1
-          # 移除 torch 和 torchvision 行（已安装 CPU 版）
-          sed -i '/^torch/d' requirements.txt
-          sed -i '/^torchvision/d' requirements.txt
-          # 移除 onnxruntime-gpu（改用 CPU 版）
-          sed -i '/^onnxruntime-gpu/d' requirements.txt
-          # 安装依赖
-          pip install -r requirements.txt
-          # 额外安装可能缺失的包
-          pip install torchcrepe fairseq
-
-      - name: 下载 RMVPE ONNX 模型
-        run: |
-          mkdir -p rvc-webui/assets
-          echo "下载 rmvpe.onnx ..."
-          wget -q --show-progress -O rvc-webui/assets/rmvpe.onnx \
-            https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/rmvpe.onnx
-          ls -lh rvc-webui/assets/rmvpe.onnx
-
+      # ---------- 缓存角色模型 ----------
       - name: 缓存角色模型
         id: cache-pth
         uses: actions/cache@v4
@@ -97,98 +78,68 @@ jobs:
             https://github.com/yingo-server/TextToSpeak/releases/download/cerydra/Cerydra_e20_s2400.pth
           ls -lh ./weights/Cerydra_e20_s2400.pth
 
-      - name: 缓存 ONNX 量化模型
+      - name: 验证并复制模型到规范目录
+        run: |
+          if [ -f ./weights/Cerydra_e20_s2400.pth ]; then
+            cp ./weights/Cerydra_e20_s2400.pth assets/weights/
+          else
+            echo "错误：模型文件不存在" && exit 1
+          fi
+
+      # ---------- 缓存 RVC 内部缓存（含 ONNX） ----------
+      - name: 缓存 RVC 内部缓存
         uses: actions/cache@v4
         with:
-          path: ./onnx_cache
-          key: cerydra-onnx-v1
+          path: ~/.cache/rvc
+          key: rvc-cache-v1
 
-      - name: 生成自定义推理脚本
-        run: |
-          cat > rvc-webui/run_infer.py << 'EOF'
-          import sys
-          import os
-          sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-          from configs.config import Config
-          from infer.modules.vc.modules import VC
-
-          def main():
-              model_path = sys.argv[1]
-              input_path = sys.argv[2]
-              output_path = sys.argv[3]
-              f0_method = sys.argv[4] if len(sys.argv) > 4 else "rmvpe"
-
-              config = Config()
-              # 设置权重目录为上级目录的 weights
-              config.weight_root = os.path.abspath("../weights")
-              config.onnx_dir = os.path.abspath("../onnx_cache")
-              config.use_onnx = True
-              os.makedirs(config.weight_root, exist_ok=True)
-              os.makedirs(config.onnx_dir, exist_ok=True)
-
-              vc = VC(config)
-              sid = 0
-              vc.get_vc(sid)  # 加载模型
-
-              # 推理参数（默认值）
-              vc_transform = 0
-              f0_file = None
-              file_index = ""
-              file_index2 = ""
-              index_rate = 0.75
-              filter_radius = 3
-              resample_sr = 0
-              rms_mix_rate = 0.25
-              protect = 0.33
-
-              info, audio_data = vc.vc_single(
-                  sid, input_path, vc_transform, f0_file, f0_method,
-                  file_index, file_index2, index_rate, filter_radius,
-                  resample_sr, rms_mix_rate, protect
-              )
-              print(info)
-              # 保存音频
-              if isinstance(audio_data, tuple) and len(audio_data) == 2:
-                  sr, audio = audio_data
-                  import soundfile as sf
-                  sf.write(output_path, audio, sr)
-              else:
-                  import shutil
-                  shutil.copy(audio_data, output_path)
-              print("转换完成，输出：", output_path)
-
-          if __name__ == "__main__":
-              main()
-          EOF
-          echo "自定义脚本已生成"
-
+      # ---------- 生成 TTS 干声并标准化 ----------
       - name: 用 Edge TTS 生成干声
         run: |
           echo "生成 TTS 干声（文字：败者成灰，胜者为王）..."
-          edge-tts --text "败者成灰，胜者为王" --write-media ./input.wav
+          edge-tts --text "败者成灰，胜者为王" --write-media ./input.raw.wav
+          # 重采样为标准格式（16kHz 单声道），提高兼容性
+          ffmpeg -i ./input.raw.wav -ar 16000 -ac 1 ./input.wav -y
           echo "干声文件信息："
           ls -lh ./input.wav
           ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 ./input.wav | xargs -I {} echo "时长：{} 秒"
 
-      - name: 运行 RVC 转换（自定义脚本）
+      # ---------- 运行 RVC 推理 ----------
+      - name: 运行 RVC 转换
         run: |
           echo "=== 开始 RVC 转换 ==="
           START_TIME=$(date +%s)
-          echo "模型：./weights/Cerydra_e20_s2400.pth"
+          echo "模型：assets/weights/Cerydra_e20_s2400.pth"
           echo "输入：./input.wav"
-          echo "ONNX 缓存：./onnx_cache"
-          echo "音高提取：rmvpe (ONNX)"
-          echo "推理中，约 5-10 分钟..."
+          echo "音高提取：rmvpe（自动 ONNX 加速）"
+          echo "推理中，约 3-6 分钟..."
 
-          cd rvc-webui
-          python run_infer.py ../weights/Cerydra_e20_s2400.pth ../input.wav ../output.mp3 rmvpe
-          cd ..
+          export CUDA_VISIBLE_DEVICES=""
+
+          # 统一使用 python -m rvc.cli 方式，避免命令查找问题
+          python -m rvc.cli infer \
+            --model_path assets/weights/Cerydra_e20_s2400.pth \
+            --input_path ./input.wav \
+            --output_path ./output.wav \
+            --f0_method rmvpe \
+            --protect 0.33 \
+            --f0_up_key 0
 
           END_TIME=$(date +%s)
           DURATION=$((END_TIME - START_TIME))
-          echo "转换完成，总耗时：${DURATION} 秒 ($((DURATION/60)) 分 $((DURATION%60)) 秒)"
+          echo "推理完成，耗时：${DURATION} 秒 ($((DURATION/60)) 分 $((DURATION%60)) 秒)"
+
+      # ---------- 检查输出并转码为 MP3 ----------
+      - name: 转码为 MP3
+        run: |
+          if [ ! -f ./output.wav ]; then
+            echo "错误：推理未生成输出文件" && exit 1
+          fi
+          echo "转换 WAV 为 MP3..."
+          ffmpeg -i ./output.wav -codec:a libmp3lame -q:a 2 ./output.mp3 -y
           ls -lh ./output.mp3
 
+      # ---------- 生成版本号（含时间戳） ----------
       - name: 生成版本号
         id: version
         run: |
@@ -197,23 +148,17 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_ENV
           echo "Release 标题：$VERSION"
+          # Tag 包含时间戳，确保每个版本独立
+          echo "TAG=output-$TIMESTAMP" >> $GITHUB_ENV
 
-      - name: 删除旧的 Release（tag=output）
-        continue-on-error: true
-        run: |
-          echo "清理旧 Release..."
-          gh release delete output --yes || true
-          git push origin :refs/tags/output || true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+      # ---------- 发布新 Release（不覆盖历史） ----------
       - name: 创建 Release
         run: |
-          echo "创建新 Release..."
-          gh release create output \
+          echo "创建 Release（Tag: ${{ env.TAG }}）..."
+          gh release create "${{ env.TAG }}" \
             ./output.mp3 \
             --title "${{ env.VERSION }}" \
-            --notes "自动生成于 $(date '+%Y-%m-%d %H:%M:%S')\n文字：败者成灰，胜者为王\n模型：刻律德菈 (无.index)\n引擎：RVC-WebUI 官方版\n量化：ONNX 加速 (自定义脚本)" \
+            --notes "自动生成于 $(date '+%Y-%m-%d %H:%M:%S')\n文字：败者成灰，胜者为王\n模型：刻律德菈 (无.index)\n引擎：官方 RVC CLI (CPU)\n加速：自动 ONNX" \
             --target ${{ github.sha }}
           echo "Release 创建成功！"
         env:
