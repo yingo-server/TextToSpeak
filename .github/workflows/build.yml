@@ -26,12 +26,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
-          key: apt-cache-${{ runner.os }}-v1
+          key: apt-cache-${{ runner.os }}-v2  # 更新版本号，因新增包
 
-      - name: 安装系统依赖（含音频库）
+      - name: 安装系统依赖（含 FFmpeg 开发库）
         run: |
           sudo apt update
-          sudo apt install -y ffmpeg git libsndfile1 libsox-dev
+          sudo apt install -y \
+            ffmpeg git \
+            libsndfile1 libsox-dev \
+            libavformat-dev libavcodec-dev libavdevice-dev \
+            libavutil-dev libavfilter-dev libswscale-dev libswresample-dev \
+            pkg-config
 
       # ---------- Python 环境 ----------
       - name: 设置 Python 3.10
@@ -43,7 +48,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-cache-${{ runner.os }}-v1
+          key: pip-cache-${{ runner.os }}-v2  # 更新版本号
 
       - name: 安装官方 RVC CLI（CPU 版）及 Edge TTS
         run: |
